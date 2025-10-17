@@ -24,6 +24,19 @@ Wallaby).  What you want to do is propose a **backport** of the fix.
    How can you tell?  Ask in the ``#openstack-cinder`` channel on IRC
    or during the open discussion part of the weekly Cinder team meeting.
 
+.. warning::
+   A backport that includes a change to ``requirements.txt`` is usually
+   not backportable (except in the case of a security issue), because it
+   may have cascading effects on packagers, and these are supposed to be
+   stable branches (it's right there in the name!).  It's possible, however,
+   that such a change will be OK, but you'll have to make a case for this
+   to the stable branch maintainers (that is, the ``cinder-stable-maint``
+   and ``stable-maint-core`` teams in gerrit).
+
+   Here's a cinder change that was proposed for backport to ``stable/2024.1``
+   (Caracal) that you can use as an example for what to check for:
+   https://review.opendev.org/c/openstack/cinder/+/963250
+
 Since we use git for source code version control, backporting is done by
 *cherry-picking* a change that has already been merged into one branch into
 another branch.  The gerrit web interface makes it really easy to do this.
@@ -36,25 +49,24 @@ In fact, maybe *too* easy.  Here are some guidelines:
 
 * Backports must be done in *reverse chronological order*.  Since
   OpenStack releases are named alphabetically, this means reverse
-  alphabetical order: ``stable/yoga``, ``stable/xena``, ``stable/wallaby``,
-  etc.
+  alphabetical order: ``stable/2025.2`` (Flamingo), ``stable/2025.1``
+  (Epoxy), ``stable/2024.2`` (Dalmatian), etc.
 
 * The cherry-pick must have **merged** into the closest most recent branch
   before it will be considered for a branch, that is, a cherry-pick to
-  ``stable/xena`` will **not** be considered until it has merged into
-  ``stable/yoga`` first.
+  ``stable/2025.1`` (Epoxy) will **not** be considered until it has merged
+  into ``stable/2025.2`` (Flamingo) first.
 
   * This is because sometimes a backport requires revision along the
     way.  For example, different OpenStack releases support different
     versions of Python.  So if a fix uses a language feature introduced
-    in Python 3.8, it will merge just fine into current master (during zed
-    development), but it will not pass unit tests in ``stable/yoga``
-    (which supports Python 3.6).  Likewise, if you already cherry-picked
-    the patch from master directly to ``stable/xena``, it won't pass tests
-    there either (because xena also supports Python 3.6).
+    in Python 3.13, it will merge just fine into current master but it
+    will not pass unit tests in older stable branches that do not support
+    that version of Python.
 
-    So it's better to follow the policy and wait until the patch is merged
-    into ``stable/yoga`` *before* you propose a backport to ``stable/xena``.
+  * This is why instead of cherry-picking a commit from master directly
+    to all 3 stable branches, it is better practice to use the commit
+    from the immediately preceding more recent stable branch.
 
 * You can propose backports directly from git instead of using the gerrit
   web interface, but if you do, you must include the fact that it's a
