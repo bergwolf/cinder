@@ -177,15 +177,12 @@ def build_ems_log_message_1(driver_name, app_version, vserver,
 
 
 def get_cluster_to_pool_map(client):
-    """Get the cluster name for ASA r2 systems.
+    """Get the cluster name (and SVM) for ASA r2 systems.
 
-    For ASA r2 systems, instead of using flexvols, we use the cluster name
-    as the pool. The map is of the format suitable for seeding the storage
-    service catalog: {<cluster_name> : {'pool_name': <cluster_name>}}
-
-    :param client: NetApp client instance to retrieve cluster information
-    :returns: Dictionary mapping cluster names to pool information
-    :raises: InvalidConfigurationValue if cluster is not disaggregated
+    For ASAr2 platform, instead of using flexvols, we use the cluster name
+    (suffixed with the SVM name) as the pool. The map is of the
+    format suitable for seeding the storage service catalog:
+        {<cluster_name> : {'pool_name': <cluster_name>[:<svm_name>]}}
     """
     pools = {}
 
@@ -201,7 +198,46 @@ def get_cluster_to_pool_map(client):
 
     cluster_name = cluster_info['name']
     LOG.debug("Found ASA r2 cluster: %s", cluster_name)
-    pools[cluster_name] = {'pool_name': cluster_name}
+
+    # Read SVM name from cinder.conf via client.vserver (netapp_vserver)
+    svm_name = getattr(client, 'vserver', None)
+    pool_name = cluster_name
+
+    if svm_name:
+        try:
+            # Validate SVM exists by looking up its UUID
+            svm_uuid = client.get_svm_uuid_by_name()
+            if svm_uuid:
+                pool_name = "%s:%s" % (cluster_name, svm_name)
+                LOG.debug("Using pool name with SVM: %s", pool_name)
+            else:
+                msg = (
+                    "SVM '%(svm)s' not found on cluster '%(cluster)s'; "
+                    "failing ASA r2 pool initialization."
+                )
+                LOG.error(msg, {'svm': svm_name, 'cluster': cluster_name})
+                raise exception.InvalidConfigurationValue(
+                    option='netapp_vserver',
+                    value=svm_name,
+                )
+        except exception.InvalidConfigurationValue:
+            # Already logged a clear error above; just propagate it without
+            # logging again to avoid duplicate log lines.
+            raise
+        except Exception as exc:
+            msg = (
+                "Error while looking up SVM '%(svm)s' on cluster "
+                "'%(cluster)s': %(err)s; failing ASA r2 pool initialization."
+            )
+            LOG.error(msg, {'svm': svm_name,
+                            'cluster': cluster_name,
+                            'err': exc})
+            raise exception.InvalidConfigurationValue(
+                option='netapp_vserver',
+                value=svm_name,
+            )
+
+    pools[cluster_name] = {'pool_name': pool_name}
 
     msg_args = {
         'cluster': cluster_name,

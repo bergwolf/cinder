@@ -3283,3 +3283,21 @@ class RestClient(object, metaclass=volume_utils.TraceWrapperMetaclass):
 
         LOG.debug('set_igroup_host_proximity: exiting - processed %d '
                   'initiators successfully', len(local_initiators))
+
+    def get_svm_uuid_by_name(self):
+        """Helper: resolve SVM UUID from name."""
+        try:
+            params = {"name": self.vserver, "fields": "uuid,name",
+                      "return_timeout": 30}
+            resp = self.send_request(
+                "/svm/svms", 'get', query=params
+            )
+        except Exception as e:
+            LOG.error("Failed to lookup SVM %s: %s", self.vserver, e)
+            return None
+
+        records = resp.get('records', []) if isinstance(resp, dict) else []
+        for r in records:
+            if r.get('name') == self.vserver:
+                return r.get('uuid')
+        return None

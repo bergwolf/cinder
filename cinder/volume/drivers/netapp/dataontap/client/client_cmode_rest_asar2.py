@@ -29,7 +29,6 @@ from cinder.volume.drivers.netapp.dataontap.client import client_cmode_rest
 from cinder.volume.drivers.netapp import utils as netapp_utils
 from cinder.volume import volume_utils
 
-
 LOG = logging.getLogger(__name__)
 
 
@@ -120,40 +119,6 @@ class RestClientASAr2(client_cmode_rest.RestClient,
         except Exception as e:
             LOG.exception('Failed to get cluster information: %s', e)
             return None
-
-    def get_cluster_capacity(self):
-        """Get cluster capacity information for ASA r2."""
-        query = {
-            'fields': 'block_storage.size,block_storage.available'
-        }
-
-        try:
-            response = self.send_request('/storage/cluster',
-                                         'get', query=query,
-                                         enable_tunneling=False)
-            if not response:
-                LOG.error('No response received from cluster capacity API')
-                return {}
-
-            block_storage = response.get('block_storage', {})
-
-            size_total = block_storage.get('size', 0)
-            size_available = block_storage.get('available', 0)
-
-            capacity = {
-                'size-total': float(size_total),
-                'size-available': float(size_available)
-            }
-
-            LOG.debug('Cluster total size %s:', capacity['size-total'])
-            LOG.debug('Cluster available size %s:', capacity['size-available'])
-
-            return capacity
-
-        except Exception as e:
-            LOG.exception('Failed to get cluster capacity: %s', e)
-            msg = _('Failed to get cluster capacity: %s')
-            raise netapp_utils.NetAppDriverException(msg % e)
 
     def get_aggregate_disk_types(self):
         """Get storage_types as array from all aggregates."""
@@ -323,8 +288,9 @@ class RestClientASAr2(client_cmode_rest.RestClient,
         }
 
         response = self.send_request('/storage/luns/', 'get', query=query)
-        records = response.get('records', [])
-        if len(records) == 0:
+
+        num_records = response.get('num_records')
+        if not num_records or str(num_records) == '0':
             return []
 
         luns = []
@@ -353,7 +319,203 @@ class RestClientASAr2(client_cmode_rest.RestClient,
 
         return namespaces
 
+    def get_aggregate_capacities(self, aggregate_names):
+        """Gets capacity info for multiple aggregates."""
+
+        return super().get_aggregate_capacities(aggregate_names)
+
     def _get_backend_lun_or_namespace(self, path):
         """Get the backend LUN or namespace"""
         paths = path.split("/")
         return paths[- 1].replace("-", "_")
+
+    def get_vserver_aggregates(self):
+        """Return list of aggregate names mapped to this SVM.
+
+        Uses the SVM collection REST API (`/svm/svms`) filtered by SVM name
+        and extracts the `aggregates` field from the matching record.
+        """
+        svm_name = self.vserver
+        LOG.debug("Getting aggregates for SVM: %s", svm_name)
+        query = {
+            "name": svm_name,
+            "fields": "name,uuid,aggregates",
+            "return_timeout": 30,
+        }
+
+        try:
+            # /api/svm/svms?name=<svm>&fields=name,uuid,aggregates
+            resp = self.send_request("/svm/svms", "get", query=query)
+        except Exception as e:
+            msg = _("Failed to get aggregates for SVM %(svm)s: %(err)s") % {
+                "svm": svm_name,
+                "err": e,
+            }
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(data=msg)
+
+        if not isinstance(resp, dict):
+            msg = _("Unexpected response type when getting aggregates for "
+                    "SVM %(svm)s: %(rtype)s") % {
+                "svm": svm_name,
+                "rtype": type(resp),
+            }
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(data=msg)
+        LOG.debug("Response for SVM aggregates request: %s", resp)
+        records = resp.get("records")
+        LOG.debug("SVM records retrieved: %s", records)
+        if not records:
+            msg = _("Failed to resolve SVM %(svm)s when "
+                    "getting aggregates.") % {
+                "svm": svm_name,
+            }
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(data=msg)
+
+        svm_record = records[0]
+        aggrs = svm_record.get("aggregates") or []
+        aggr_names = [aggr.get("name") for aggr in aggrs if aggr.get("name")]
+
+        LOG.debug("SVM %s mapped aggregates: %s", svm_name, aggr_names)
+        return aggr_names
+
+    def get_storage_availability_zones(self):
+        """Return list of storage availability zone names (SAZs).
+
+        Calls /api/storage/availability-zones and extracts the *name*
+        field from each record.
+        """
+        query = {
+            'fields': 'name',
+        }
+
+        try:
+            resp = self.send_request(
+                '/storage/availability-zones', 'get',
+                query=query, enable_tunneling=False,
+            )
+        except Exception as e:
+            msg = _('Failed to get storage availability zones: %s') % e
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(msg)
+
+        if not isinstance(resp, dict):
+            msg = _('Unexpected response type for availability zones: %s') % (
+                type(resp),
+            )
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(msg)
+
+        records = resp.get('records') or []
+        saz_list = [r.get('name') for r in records if r.get('name')]
+
+        LOG.debug('Retrieved storage availability zones: %s', saz_list)
+        return saz_list
+
+    def get_lun_sizes_by_svm(self):
+        """"Gets the list of LUNs for an SVM and their sizes"""
+
+        query = {
+            'svm.name': self.vserver,
+            'fields': 'space.size,name'
+        }
+
+        response = self.send_request('/storage/luns/', 'get', query=query)
+
+        num_records = response.get('num_records')
+        if not num_records or str(num_records) == '0':
+            return []
+
+        luns = []
+        for lun_info in response['records']:
+            luns.append({
+                'path': lun_info.get('name', ''),
+                'size': float(lun_info.get('space', {}).get('size', 0))
+            })
+        return luns
+
+    def get_namespace_sizes_by_svm(self):
+        """Gets the list of namespaces for an SVM and their sizes."""
+
+        query = {
+            'svm.name': self.vserver,
+            'fields': 'space.size,name',
+        }
+
+        response = self.send_request('/storage/namespaces', 'get', query=query)
+
+        num_records = response.get('num_records')
+        if not num_records or str(num_records) == '0':
+            return []
+
+        namespaces = []
+        for ns_info in response.get('records', []):
+            size = ns_info.get('space', {}).get('size', 0)
+            try:
+                size = int(size)
+            except (TypeError, ValueError):
+                size = 0
+
+            namespaces.append({
+                'path': ns_info.get('name', ''),
+                'size': size,
+            })
+
+        return namespaces
+
+    def get_storage_units_by_svm(self, vserver):
+        """Return storage units for the given SVM via REST.
+
+        Each entry is a dict with:
+        - 'name': storage unit name
+        - 'uuid': storage unit uuid
+        - 'provisioned-size': provisioned size in bytes (int), taken from
+          'space.size'.
+        """
+        query = {
+            'svm.name': vserver,
+            'fields': 'name,uuid,space.size,type',
+        }
+
+        try:
+            # /api/storage/storage-units?svm.name=<svm>&fields=name,uuid,space.size,type
+            resp = self.send_request(
+                '/storage/storage-units',
+                'get',
+                query=query,
+            )
+        except Exception as e:
+            msg = _('Failed to get storage units for SVM %(svm)s: %(err)s') % {
+                'svm': vserver,
+                'err': e,
+            }
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(msg)
+
+        if not isinstance(resp, dict):
+            msg = _('Unexpected response type for storage units: %s') % (
+                type(resp),
+            )
+            LOG.error(msg)
+            raise netapp_utils.NetAppDriverException(msg)
+
+        records = resp.get('records') or []
+        storage_units = []
+
+        for rec in records:
+            space = rec.get('space') or {}
+            size = space.get('size') or 0
+            try:
+                size = int(size)
+            except (TypeError, ValueError):
+                size = 0
+
+            storage_units.append({
+                'name': rec.get('name'),
+                'uuid': rec.get('uuid'),
+                'provisioned-size': size,
+                'type': rec.get('type')
+            })
+
+        return storage_units

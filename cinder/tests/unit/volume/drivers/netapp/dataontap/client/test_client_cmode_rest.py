@@ -4865,3 +4865,65 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             self.client.failover_snapmirror_active_sync,
             'svm_src', 'cg_src', 'svm_dst', 'cg_dst')
         assert mock_send_request.call_count >= 1
+
+    @mock.patch.object(client_cmode_rest.RestClient,
+                       'send_request')
+    def test_get_svm_uuid_by_name_returns_uuid_when_record_matches_vserver(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'records': [
+                {'name': 'svm0', 'uuid': 'uuid-0'},
+                {'name': 'svm1', 'uuid': 'uuid-1'},
+            ]
+        }
+
+        result = self.client.get_svm_uuid_by_name()
+
+        self.assertEqual('uuid-1', result)
+        mock_send_request.assert_called_once_with(
+            '/svm/svms',
+            'get',
+            query={
+                'name': 'svm1',
+                'fields': 'uuid,name',
+                'return_timeout': 30,
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest.RestClient,
+                       'send_request')
+    def test_get_svm_uuid_by_name_returns_none_when_no_matching_record(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'records': [
+                {'name': 'other', 'uuid': 'uuid-0'},
+            ]
+        }
+
+        result = self.client.get_svm_uuid_by_name()
+
+        self.assertIsNone(result)
+
+    @mock.patch.object(client_cmode_rest.RestClient,
+                       'send_request')
+    def test_get_svm_uuid_by_name_returns_none_when_response_not_dict(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = ['unexpected']
+
+        result = self.client.get_svm_uuid_by_name()
+
+        self.assertIsNone(result)
+
+    @mock.patch.object(client_cmode_rest.RestClient,
+                       'send_request')
+    def test_get_svm_uuid_by_name_returns_none_on_exception(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.side_effect = Exception('lookup failed')
+
+        result = self.client.get_svm_uuid_by_name()
+
+        self.assertIsNone(result)

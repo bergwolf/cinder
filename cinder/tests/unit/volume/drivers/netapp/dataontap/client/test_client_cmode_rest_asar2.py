@@ -26,10 +26,11 @@ from cinder.tests.unit.volume.drivers.netapp.dataontap import fakes as fake
 from cinder.volume.drivers.netapp.dataontap.client import api as netapp_api
 from cinder.volume.drivers.netapp.dataontap.client import client_cmode
 from cinder.volume.drivers.netapp.dataontap.client import client_cmode_rest
-from cinder.volume.drivers.netapp.dataontap.client.client_cmode_rest_asar2\
+from cinder.volume.drivers.netapp.dataontap.client \
+    import client_cmode_rest_asar2
+from cinder.volume.drivers.netapp.dataontap.client.client_cmode_rest_asar2 \
     import RestClientASAr2
 from cinder.volume.drivers.netapp import utils as netapp_utils
-
 
 CONNECTION_INFO = {'hostname': 'hostname',
                    'transport_type': 'https',
@@ -333,117 +334,6 @@ class NetAppRestCmodeASAr2ClientTestCase(test.TestCase):
         self.client.send_request.assert_called_once_with(
             '/cluster', 'get', query=expected_query, enable_tunneling=False)
         self.assertIsNone(result)
-
-    def test_get_cluster_capacity_success(self):
-        """Test successful cluster capacity retrieval."""
-        expected_response = fake_client.GET_CLUSTER_CAPACITY_RESPONSE_REST
-
-        self.mock_object(self.client, 'send_request',
-                         return_value=expected_response)
-
-        result = self.client.get_cluster_capacity()
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get',
-            query=expected_query, enable_tunneling=False)
-
-        expected_capacity = {
-            'size-total': float(expected_response['block_storage']['size']),
-            'size-available':
-                float(expected_response['block_storage']['available'])
-        }
-        self.assertEqual(expected_capacity, result)
-
-    def test_get_cluster_capacity_no_response(self):
-        """Test cluster capacity retrieval with no response."""
-        self.mock_object(self.client, 'send_request',
-                         return_value=None)
-
-        result = self.client.get_cluster_capacity()
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get',
-            query=expected_query, enable_tunneling=False)
-        self.assertEqual({}, result)
-
-    def test_get_cluster_capacity_missing_block_storage(self):
-        """Test cluster capacity retrieval with missing block_storage."""
-        response = {'some_other_field': 'value'}
-
-        self.mock_object(self.client, 'send_request',
-                         return_value=response)
-
-        result = self.client.get_cluster_capacity()
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get',
-            query=expected_query, enable_tunneling=False)
-
-        expected_capacity = {
-            'size-total': 0.0,
-            'size-available': 0.0
-        }
-        self.assertEqual(expected_capacity, result)
-
-    def test_get_cluster_capacity_partial_block_storage(self):
-        """Test cluster capacity retrieval with partial block_storage."""
-        response = {
-            'block_storage': {
-                'size': 1000000000,
-                # missing 'available' field
-            }
-        }
-
-        self.mock_object(self.client, 'send_request',
-                         return_value=response)
-
-        result = self.client.get_cluster_capacity()
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get',
-            query=expected_query, enable_tunneling=False)
-
-        expected_capacity = {
-            'size-total': 1000000000.0,
-            'size-available': 0.0
-        }
-        self.assertEqual(expected_capacity, result)
-
-    def test_get_cluster_capacity_exception(self):
-        """Test exception handling during cluster capacity retrieval."""
-        self.mock_object(self.client, 'send_request',
-                         side_effect=Exception("API error"))
-
-        self.assertRaises(netapp_utils.NetAppDriverException,
-                          self.client.get_cluster_capacity)
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get',
-            query=expected_query, enable_tunneling=False)
-
-    def test_get_cluster_capacity_netapp_api_error(self):
-        """Test NetApp API error handling during cluster capacity retrieval."""
-        self.mock_object(self.client, 'send_request',
-                         side_effect=netapp_api.NaApiError("NetApp API error"))
-
-        self.assertRaises(netapp_utils.NetAppDriverException,
-                          self.client.get_cluster_capacity)
-
-        expected_query =\
-            {'fields': 'block_storage.size,block_storage.available'}
-        self.client.send_request.assert_called_once_with(
-            '/storage/cluster', 'get', query=expected_query,
-            enable_tunneling=False)
 
     def test_get_aggregate_disk_types_success(self):
         """Test successful aggregate disk types retrieval."""
@@ -1043,3 +933,431 @@ class NetAppRestCmodeASAr2ClientTestCase(test.TestCase):
         self.client._get_backend_lun_or_namespace.assert_called_once_with(
             '/vol/vol1/invalid_namespace')
         mock_send_request.assert_not_called()
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2, 'send_request')
+    def test_get_vserver_aggregates_returns_names(self, mock_send_request):
+        self.client.vserver = 'svm1'
+
+        mock_send_request.return_value = {
+            'records': [
+                {
+                    'name': 'svm1',
+                    'uuid': 'uuid-1234',
+                    'aggregates': [
+                        {'name': 'aggr1'},
+                        {'name': 'aggr2'},
+                        {'name': None},
+                    ],
+                },
+                {
+                    'name': 'other',
+                    'uuid': 'uuid-other',
+                    'aggregates': [{'name': 'aggrX'}],
+                },
+            ]
+        }
+
+        result = self.client.get_vserver_aggregates()
+
+        self.assertEqual(['aggr1', 'aggr2'], result)
+        mock_send_request.assert_called_once_with(
+            '/svm/svms',
+            'get',
+            query={
+                'name': 'svm1',
+                'fields': 'name,uuid,aggregates',
+                'return_timeout': 30,
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_vserver_aggregates_falls_back_when_svm_not_found(
+            self, mock_send_request):
+        # Simulate a configured SVM name that doesn't exist
+        # in the response
+        self.client.vserver = 'missing-svm'
+
+        # Mock the REST response: only another SVM ("other") with aggrX
+        mock_send_request.return_value = {
+            'num_records': 1,
+            'records': [
+                {'name': 'other', 'aggregates': [{'name': 'aggrX'}]},
+            ],
+        }
+
+        result = self.client.get_vserver_aggregates()
+
+        self.assertEqual(['aggrX'], result)
+
+        # Ensure we called the right ONTAP REST endpoint and query
+        mock_send_request.assert_called_once_with(
+            '/svm/svms',
+            'get',
+            query={
+                'name': 'missing-svm',
+                'fields': 'name,uuid,aggregates',
+                'return_timeout': 30,
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_vserver_aggregates_empty_response_from_svm_detail(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = ['unexpected']
+
+        # testtools.TestCase.assertRaises requires the callable style
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_vserver_aggregates,
+        )
+
+        mock_send_request.assert_called_once_with(
+            '/svm/svms',
+            'get',
+            query={
+                'name': 'svm1',
+                'fields': 'name,uuid,aggregates',
+                'return_timeout': 30,
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_vserver_aggregates_raises_exception_fetching_svm(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.side_effect = Exception('exception occurred')
+
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_vserver_aggregates,
+        )
+
+        mock_send_request.assert_called_once_with(
+            '/svm/svms',
+            'get',
+            query={
+                'name': 'svm1',
+                'fields': 'name,uuid,aggregates',
+                'return_timeout': 30,
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2, 'send_request')
+    def test_retrieves_storage_availability_zones_successfully(
+            self, mock_send_request):
+        mock_send_request.return_value = {
+            'records': [{'name': 'zone1'},
+                        {'name': 'zone2'},
+                        {'name': 'zone3'}]
+        }
+
+        result = self.client.get_storage_availability_zones()
+
+        self.assertEqual(['zone1', 'zone2', 'zone3'], result)
+        mock_send_request.assert_called_once_with(
+            '/storage/availability-zones',
+            'get',
+            query={'fields': 'name'},
+            enable_tunneling=False,
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_handles_no_storage_availability_zones(self, mock_send_request):
+        mock_send_request.return_value = {'records': []}
+
+        result = self.client.get_storage_availability_zones()
+
+        self.assertEqual([], result)
+        mock_send_request.assert_called_once_with(
+            '/storage/availability-zones',
+            'get',
+            query={'fields': 'name'},
+            enable_tunneling=False,
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_exception_get_storage_availability_zones_invalid_response(
+            self, mock_send_request):
+        mock_send_request.return_value = "invalid_response"
+
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_storage_availability_zones,
+        )
+
+        mock_send_request.assert_called_once_with(
+            '/storage/availability-zones',
+            'get',
+            query={'fields': 'name'},
+            enable_tunneling=False,
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_exception_get_storage_availability_zones_request_failure(
+            self, mock_send_request):
+        mock_send_request.side_effect = Exception("Request failed")
+
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_storage_availability_zones,
+        )
+
+        mock_send_request.assert_called_once_with(
+            '/storage/availability-zones',
+            'get',
+            query={'fields': 'name'},
+            enable_tunneling=False,
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_namespace_sizes_by_svm_no_records(self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'num_records': '0',
+            'records': [],
+        }
+
+        result = self.client.get_namespace_sizes_by_svm()
+
+        self.assertEqual([], result)
+        mock_send_request.assert_called_once_with(
+            '/storage/namespaces',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'space.size,name',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_namespace_sizes_by_svm_invalid_size(self, mock_send_request):
+        mock_send_request.return_value = {
+            'num_records': 1,
+            'records': [
+                {'name': 'ns-bad', 'space': {'size': 'not-a-number'}},
+            ],
+        }
+
+        result = self.client.get_namespace_sizes_by_svm()
+
+        expected = [
+            {'path': 'ns-bad', 'size': 0},
+        ]
+        self.assertEqual(expected, result)
+
+        mock_send_request.assert_called_once_with(
+            '/storage/namespaces',
+            'get',
+            query={'svm.name': self.client.vserver,
+                   'fields': 'space.size,name'},
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_namespace_sizes_by_svm_with_records(self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'num_records': 2,
+            'records': [
+                {
+                    'name': 'ns1',
+                    'space': {'size': 1234},
+                },
+                {
+                    'name': 'ns2',
+                    'space': {'size': 5678},
+                },
+            ],
+        }
+
+        result = self.client.get_namespace_sizes_by_svm()
+
+        expected = [
+            {'path': 'ns1', 'size': 1234.0},
+            {'path': 'ns2', 'size': 5678.0},
+        ]
+        self.assertEqual(expected, result)
+        mock_send_request.assert_called_once_with(
+            '/storage/namespaces',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'space.size,name',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_storage_units_by_svm_success(self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'num_records': 2,
+            'records': [
+                {
+                    'name': 'su1',
+                    'uuid': 'uuid-1',
+                    'space': {'size': 1234},
+                },
+                {
+                    'name': 'su2',
+                    'uuid': 'uuid-2',
+                    'space': {'size': 5678},
+                },
+            ],
+        }
+
+        result = self.client.get_storage_units_by_svm(vserver='svm1')
+
+        expected = [
+            {
+                'name': 'su1',
+                'uuid': 'uuid-1',
+                'provisioned-size': 1234,
+                'type': None,
+            },
+            {
+                'name': 'su2',
+                'uuid': 'uuid-2',
+                'provisioned-size': 5678,
+                'type': None,
+            },
+        ]
+        self.assertEqual(expected, result)
+        mock_send_request.assert_called_once_with(
+            '/storage/storage-units',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'name,uuid,space.size,type',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_storage_units_by_svm_empty_records(self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'num_records': 0,
+            'records': [],
+        }
+
+        result = self.client.get_storage_units_by_svm(vserver='svm1')
+
+        self.assertEqual([], result)
+        mock_send_request.assert_called_once_with(
+            '/storage/storage-units',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'name,uuid,space.size,type',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_storage_units_by_svm_handles_bad_entries(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = {
+            'num_records': 3,
+            'records': [
+                {
+                    'name': 'su1',
+                    'uuid': 'uuid-1',
+                    'space': {'size': 10},
+                },
+                {
+                    'name': 'su2',
+                    'uuid': 'uuid-2',
+                    # missing space -> size 0
+                },
+                {
+                    'name': 'su3',
+                    'uuid': 'uuid-3',
+                    'space': {'size': 'not-an-int'},
+                },
+            ],
+        }
+
+        result = self.client.get_storage_units_by_svm(vserver='svm1')
+
+        expected = [
+            {
+                'name': 'su1',
+                'uuid': 'uuid-1',
+                'provisioned-size': 10,
+                'type': None,
+            },
+            {
+                'name': 'su2',
+                'uuid': 'uuid-2',
+                'provisioned-size': 0,
+                'type': None,
+            },
+            {
+                'name': 'su3',
+                'uuid': 'uuid-3',
+                'provisioned-size': 0,
+                'type': None,
+            },
+        ]
+        self.assertEqual(expected, result)
+        mock_send_request.assert_called_once_with(
+            '/storage/storage-units',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'name,uuid,space.size,type',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_storage_units_by_svm_raises_on_non_dict_response(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.return_value = ['unexpected']
+
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_storage_units_by_svm,
+            vserver='svm1',
+        )
+        mock_send_request.assert_called_once_with(
+            '/storage/storage-units',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'name,uuid,space.size,type',
+            },
+        )
+
+    @mock.patch.object(client_cmode_rest_asar2.RestClientASAr2,
+                       'send_request')
+    def test_get_storage_units_by_svm_raises_on_request_failure(
+            self, mock_send_request):
+        self.client.vserver = 'svm1'
+        mock_send_request.side_effect = Exception('failure')
+
+        self.assertRaises(
+            netapp_utils.NetAppDriverException,
+            self.client.get_storage_units_by_svm,
+            vserver='svm1',
+        )
+        mock_send_request.assert_called_once_with(
+            '/storage/storage-units',
+            'get',
+            query={
+                'svm.name': 'svm1',
+                'fields': 'name,uuid,space.size,type',
+            },
+        )
