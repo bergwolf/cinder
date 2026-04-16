@@ -42,7 +42,7 @@ import stat
 import sys
 import tempfile
 import typing
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from typing import Optional, Type, Union
 
 import eventlet
@@ -72,6 +72,25 @@ INFINITE_UNKNOWN_VALUES = ('infinite', 'unknown')
 synchronized = lockutils.synchronized_with_prefix('cinder-')
 synchronized_remove = lockutils.remove_external_lock_file_with_prefix(
     'cinder-')
+
+
+def concurrency_mode_threading() -> bool:
+    """Return True when running with native threads instead of eventlet."""
+    from cinder import monkey_patch
+    return not monkey_patch.is_patched()
+
+
+def tpool_wrap(obj: Any, autowrap: tuple[Type[Any], ...] = ()) -> Any:
+    """Wrap obj so blocking I/O does not stall the event loop.
+
+    Under eventlet, wraps *obj* with ``tpool.Proxy`` so every method call
+    is dispatched to a native thread pool, preventing the calling
+    greenthread from blocking.  In native-thread mode the object is
+    returned unchanged because real threads already run concurrently.
+    """
+    if concurrency_mode_threading():
+        return obj
+    return tpool.Proxy(obj, autowrap)
 
 
 def get_region_filtered_endpoint(endpoints, endpoint_type, region_name=None):
@@ -1025,7 +1044,7 @@ class Semaphore(object):
         # Eventlet does not work with multiprocessing's Semaphore, so we have
         # to execute it in a native thread to avoid getting blocked when trying
         # to acquire the semaphore.
-        return tpool.execute(self.semaphore.__enter__)
+        return tpool_wrap(self.semaphore.__enter__)()
 
     def __exit__(self, *args):
         # Don't use native thread for exit, as it will only add overhead
@@ -1034,7 +1053,8 @@ class Semaphore(object):
 
 def semaphore_factory(limit: int,
                       concurrent_processes: int) -> Union[eventlet.Semaphore,
-                                                          Semaphore]:
+                                                          Semaphore,
+                                                          contextlib.suppress]:
     """Get a semaphore to limit concurrent operations.
 
     The semaphore depends on the limit we want to set and the concurrent
@@ -1042,6 +1062,10 @@ def semaphore_factory(limit: int,
     """
     # Limit of 0 is no limit, so we won't use a semaphore
     if limit:
+        # In native-thread mode always use our multiprocessing-backed
+        # Semaphore; eventlet.Semaphore is not appropriate here.
+        if concurrency_mode_threading():
+            return Semaphore(limit)
         # If we only have 1 process we can use eventlet's Semaphore
         if concurrent_processes == 1:
             return eventlet.Semaphore(limit)
