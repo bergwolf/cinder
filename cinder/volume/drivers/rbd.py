@@ -25,7 +25,6 @@ from typing import Any, Optional, Union
 import urllib.parse
 
 from castellan import key_manager
-from eventlet import tpool
 from os_brick.initiator import linuxrbd
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -229,11 +228,12 @@ class RBDVolumeProxy(object):
             pool, remote, timeout) if self._close_conn else (client, ioctx)
 
         try:
-            self.volume = driver.rbd.Image(rados_ioctx,
-                                           name,
-                                           snapshot=snapshot,
-                                           read_only=read_only)
-            self.volume = tpool.Proxy(self.volume)
+            self.volume = utils.tpool_wrap(
+                driver.rbd.Image(rados_ioctx,
+                                 name,
+                                 snapshot=snapshot,
+                                 read_only=read_only))
+
         except driver.rbd.Error:
             if self._close_conn:
                 driver._disconnect_from_rados(rados_client, rados_ioctx)
@@ -563,8 +563,8 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
 
         self._start_periodic_tasks()
 
-    def RBDProxy(self) -> tpool.Proxy:
-        return tpool.Proxy(self.rbd.RBD())
+    def RBDProxy(self):
+        return utils.tpool_wrap(self.rbd.RBD())
 
     def _ceph_args(self) -> list[str]:
         args = []
@@ -605,10 +605,10 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                       {'user': user, 'name': name, 'conf': conf,
                        'timeout': timeout})
 
-            client = self.rados.Rados(rados_id=user,
-                                      clustername=name,
-                                      conffile=conf)
-            client = tpool.Proxy(client)
+            client = utils.tpool_wrap(
+                self.rados.Rados(rados_id=user,
+                                 clustername=name,
+                                 conffile=conf))
 
             try:
                 if timeout >= 0:
