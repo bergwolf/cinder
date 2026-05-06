@@ -228,7 +228,9 @@ class NetAppDataOntapUtilsTestCase(test.TestCase):
                 'disaggregated': True
             })
         expected_pool_map = {
-            'cluster1': {'pool_name': 'cluster1'}
+            'cluster1': {
+                'pool_name': f"cluster1:{mock_client.vserver}",
+            },
         }
 
         result = utils.get_cluster_to_pool_map(mock_client)

@@ -616,6 +616,7 @@ class NetAppNVMeStorageLibraryTestCase(test.TestCase):
             'sparse_copy_volume': True,
             'replication_enabled': False,
             'storage_protocol': 'nvme',
+            'netapp_disaggregated_platform': False,
         }
         self.assertEqual(expected_ssc, self.library._stats)
 
@@ -715,10 +716,12 @@ class NetAppNVMeStorageLibraryTestCase(test.TestCase):
             'netapp_dedup': 'true',
             'netapp_aggregate': 'aggr1',
             'netapp_raid_type': 'raid_dp',
+            'netapp_storage_availability_zones': None,
             'netapp_disk_type': 'SSD',
             'online_extend_support': True,
             'netapp_is_flexgroup': 'false',
             'total_volumes': 2,
+            'netapp_disaggregated_platform': False,
         }]
         if report_provisioned_capacity:
             expected[0].update({'provisioned_capacity_gb': 5.0})
@@ -1292,3 +1295,117 @@ class NetAppNVMeStorageLibraryTestCase(test.TestCase):
         mock_flexvol_pool_map.assert_called_once_with()
         self.library.ssc_library.update_ssc.assert_called_once_with(
             fake.POOL_NAME)
+
+    def get_disaggregated_capacity_with_valid_aggregates(self):
+        aggregates = ['aggr1', 'aggr2']
+        aggr_capacities = {
+            'aggr1': {'size-total': 10 * units.Gi,
+                      'size-available': 4 * units.Gi},
+            'aggr2': {'size-total': 6 * units.Gi,
+                      'size-available': 2 * units.Gi},
+        }
+
+        self.library.client.get_vserver_aggregates.return_value = aggregates
+        self.library.client.get_aggregate_capacities.return_value = (
+            aggr_capacities)
+
+        result = self.library._get_disaggregated_capacity()
+
+        (self.library.client.get_vserver_aggregates.
+         assert_called_once_with(self.library.vserver))
+        (self.library.client.get_aggregate_capacities.
+         assert_called_once_with(aggregates))
+        self.assertEqual(16 * units.Gi, result['size-total'])
+        self.assertEqual(6 * units.Gi, result['size-available'])
+
+    def get_disaggregated_capacity_with_no_aggregates(self):
+        self.library.client.get_vserver_aggregates.return_value = []
+        self.library.client.get_aggregate_capacities.return_value = {}
+
+        result = self.library._get_disaggregated_capacity()
+
+        (self.library.client.get_vserver_aggregates.
+         assert_called_once_with(self.library.vserver))
+        (self.library.client.get_aggregate_capacities.
+         assert_called_once_with([]))
+        self.assertEqual(0, result['size-total'])
+        self.assertEqual(0, result['size-available'])
+
+    def get_disaggregated_capacity_with_missing_capacity_keys(self):
+        aggregates = ['aggr1', 'aggr2']
+        aggr_capacities = {
+            'aggr1': {'size-total': 5 * units.Gi},  # Missing size-available
+            'aggr2': {'size-available': 3 * units.Gi},  # Missing size-total
+        }
+
+        self.library.client.get_vserver_aggregates.return_value = aggregates
+        self.library.client.get_aggregate_capacities.return_value = (
+            aggr_capacities)
+
+        result = self.library._get_disaggregated_capacity()
+
+        self.assertEqual(5 * units.Gi, result['size-total'])
+        self.assertEqual(3 * units.Gi, result['size-available'])
+
+    def get_disaggregated_capacity_with_invalid_aggregate_data(self):
+        aggregates = ['aggr1', 'aggr2']
+        aggr_capacities = {
+            'aggr1': {'size-total': 'invalid', 'size-available': 3 * units.Gi},
+            'aggr2': {'size-total': 5 * units.Gi, 'size-available': 'invalid'},
+        }
+
+        self.library.client.get_vserver_aggregates.return_value = aggregates
+        self.library.client.get_aggregate_capacities.return_value = (
+            aggr_capacities)
+
+        result = self.library._get_disaggregated_capacity()
+
+        self.assertEqual(0, result['size-total'])
+        self.assertEqual(0, result['size-available'])
+
+    def test_get_disaggregated_provisioned_capacity_sums_sizes(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        storage_units = [
+            {'name': 'su1', 'uuid': 'uuid1',
+             'provisioned-size': 10 * units.Gi},
+            {'name': 'su2', 'uuid': 'uuid2',
+             'provisioned-size': 20 * units.Gi},
+        ]
+        self.client.get_storage_units_by_svm.return_value = storage_units
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        self.assertEqual(30 * units.Gi, result)
+        (self.client.get_storage_units_by_svm.
+         assert_called_once_with(vserver='fake_svm'))
+
+    def test_get_disaggregated_provisioned_capacity_handles_bad_entries(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        self.client.get_storage_units_by_svm.return_value = [
+            {'provisioned-size': 10 * units.Gi},
+            {'provisioned-size': 'not-a-number'},
+            {},  # missing provisioned-size
+        ]
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        # Only the first entry should contribute to the sum
+        self.assertEqual(10 * units.Gi, result)
+        (self.client.get_storage_units_by_svm.
+         assert_called_once_with(vserver='fake_svm'))
+
+    def test_get_disaggregated_provisioned_capacity_empty_list(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        self.client.get_storage_units_by_svm.return_value = []
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        self.assertEqual(0, result)
+        (self.client.get_storage_units_by_svm.
+         assert_called_once_with(vserver='fake_svm'))

@@ -21,6 +21,7 @@ from unittest import mock
 from unittest.mock import patch
 
 import ddt
+from oslo_utils import units
 
 from cinder import exception
 from cinder.objects import fields
@@ -568,7 +569,7 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
             'reserved_percentage': 5,
-            'max_over_subscription_ratio': 10,
+            'max_over_subscription_ratio': 10.0,
             'multiattach': True,
             'total_capacity_gb': 10.0,
             'free_capacity_gb': 2.0,
@@ -585,11 +586,13 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             'netapp_dedup': 'true',
             'netapp_aggregate': 'aggr1',
             'netapp_raid_type': 'raid_dp',
+            'netapp_storage_availability_zones': None,
             'netapp_disk_type': 'SSD',
             'replication_enabled': False,
             'online_extend_support': True,
             'netapp_is_flexgroup': 'false',
             'total_volumes': 2,
+            'netapp_disaggregated_platform': False,
             'clone_across_pools': True,
         }]
         if report_provisioned_capacity:
@@ -599,7 +602,7 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         if not cluster_credentials:
             expected[0].update({
                 'netapp_aggregate_used_percent': 0,
-                'netapp_dedupe_used_percent': 0.0
+                'netapp_dedupe_used_percent': 0
             })
 
         if replication_backends:
@@ -2001,6 +2004,34 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         mock_log.debug.assert_any_call(
             "Successfully updated perf cache for cluster.")
 
+    def test_get_disaggregated_capacity_basic(self):
+        """Aggregates present, all capacities present."""
+        aggregates = ['aggr1', 'aggr2']
+        aggr_capacities = {
+            'aggr1': {'size-total': 10 * units.Gi,
+                      'size-available': 4 * units.Gi},
+            'aggr2': {'size-total': 6 * units.Gi,
+                      'size-available': 2 * units.Gi},
+        }
+
+        self.library.zapi_client.get_vserver_aggregates.return_value = (
+            aggregates
+        )
+        self.library.zapi_client.get_aggregate_capacities.return_value = (
+            aggr_capacities
+        )
+
+        result = self.library._get_disaggregated_capacity()
+
+        (self.library.zapi_client.
+         get_vserver_aggregates.assert_called_once_with())
+        (self.library.zapi_client.
+            get_aggregate_capacities.assert_called_once_with(
+                aggregates
+            ))
+        self.assertEqual(16 * units.Gi, result['size-total'])
+        self.assertEqual(6 * units.Gi, result['size-available'])
+
     # Tests for _get_lun_location_info
     def test_get_lun_location_info(self):
         self.library.vserver = fake.CROSS_POOL_VSERVER
@@ -2117,13 +2148,102 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             return_value={'job-status': 'in-progress'})
         mock_cancel = self.mock_object(
             self.zapi_client, 'cancel_lun_copy')
-
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.library._wait_for_lun_copy_completion,
             fake.CROSS_POOL_JOB_UUID)
-
         mock_cancel.assert_called_once_with(fake.CROSS_POOL_JOB_UUID)
+
+    def test_get_disaggregated_capacity_no_aggregates(self):
+        """No SVM mapped aggregates returns all zeros."""
+        aggregates = []
+        aggr_capacities = {}
+
+        self.library.zapi_client.get_vserver_aggregates.return_value = (
+            aggregates
+        )
+        self.library.zapi_client.get_aggregate_capacities.return_value = (
+            aggr_capacities
+        )
+
+        result = self.library._get_disaggregated_capacity()
+
+        (self.library.zapi_client.
+         get_vserver_aggregates.assert_called_once_with())
+        (self.library.zapi_client.
+         get_aggregate_capacities.assert_called_once_with(
+             aggregates
+         ))
+        self.assertEqual(0, result['size-total'])
+        self.assertEqual(0, result['size-available'])
+
+    def test_get_disaggregated_capacity_missing_keys(self):
+        """Gracefully handle capacity dicts missing size fields."""
+        aggregates = ['aggr1', 'aggr2']
+        aggr_capacities = {
+            'aggr1': {'size-total': 5 * units.Gi},  # missing size-available
+            'aggr2': {'size-available': 3 * units.Gi},  # missing size-total
+        }
+
+        self.library.zapi_client.get_vserver_aggregates.return_value = (
+            aggregates
+        )
+        self.library.zapi_client.get_aggregate_capacities.return_value = (
+            aggr_capacities
+        )
+
+        result = self.library._get_disaggregated_capacity()
+
+        self.assertEqual(5 * units.Gi, result['size-total'])
+        self.assertEqual(3 * units.Gi, result['size-available'])
+
+    def test_get_disaggregated_provisioned_capacity_sums_sizes(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        storage_units = [
+            {'name': 'su1', 'uuid': 'uuid1',
+             'provisioned-size': 10 * units.Gi},
+            {'name': 'su2', 'uuid': 'uuid2',
+             'provisioned-size': 20 * units.Gi},
+        ]
+        self.library.zapi_client.get_storage_units_by_svm.return_value = (
+            storage_units
+        )
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        self.assertEqual(30 * units.Gi, result)
+        (self.library.zapi_client.get_storage_units_by_svm.
+         assert_called_once_with(vserver='fake_svm'))
+
+    def test_get_disaggregated_provisioned_capacity_handles_bad_entries(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        self.library.zapi_client.get_storage_units_by_svm.return_value = [
+            {'provisioned-size': '10'},
+            {'provisioned-size': 'not-a-number'},
+            {},
+        ]
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        self.assertEqual(10, result)
+        self.library.zapi_client.get_storage_units_by_svm. \
+            assert_called_once_with(vserver='fake_svm')
+
+    def test_get_disaggregated_provisioned_capacity_empty_list(self):
+        # Ensure vserver is the expected string
+        self.library.vserver = 'fake_svm'
+
+        self.library.zapi_client.get_storage_units_by_svm.return_value = []
+
+        result = self.library._get_disaggregated_provisioned_capacity()
+
+        self.assertEqual(0, result)
+        (self.library.zapi_client.get_storage_units_by_svm.
+         assert_called_once_with(vserver='fake_svm'))
 
     def test_wait_for_lun_copy_completion_default_timeout(self):
         self.library.configuration.netapp_lun_copy_timeout = None
@@ -2131,7 +2251,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         mock_get_status = self.mock_object(
             self.zapi_client, 'get_lun_copy_status',
             return_value={'job-status': 'complete'})
-
         self.library._wait_for_lun_copy_completion(
             fake.CROSS_POOL_JOB_UUID)
 
@@ -2212,7 +2331,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         self.mock_object(
             self.zapi_client, 'cancel_lun_copy',
             side_effect=Exception('Cancel failed'))
-
         self.assertRaises(
             exception.VolumeBackendAPIException,
             self.library._wait_for_lun_copy_completion,
@@ -2226,7 +2344,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             return_value=fake.CROSS_POOL_JOB_UUID)
         mock_wait = self.mock_object(
             self.library, '_wait_for_lun_copy_completion')
-
         self.library._copy_lun_cross_aggregates(
             fake.CROSS_POOL_SRC_LUN_PATH, fake.CROSS_POOL_DST_LUN_PATH,
             fake.CROSS_POOL_SOURCE_LOCATION_INFO,
@@ -2261,7 +2378,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         self.library._copy_lun_cross_aggregates(
             fake.CROSS_POOL_SRC_LUN_PATH, fake.CROSS_POOL_DST_LUN_PATH,
             src_info, dst_info)
-
         mock_start_lun_copy.assert_called_once_with(
             lun_name='volume-src-uuid',
             dest_ontap_volume=fake.CROSS_POOL_DST_POOL,
@@ -2323,7 +2439,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
 
         result = self.library._clone_source_to_destination(
             fake.CROSS_POOL_CLONE_SOURCE, fake.CROSS_POOL_CLONE_DESTINATION)
-
         mock_location.assert_called_once_with(fake.CROSS_POOL_SRC_LUN_PATH)
         mock_boundary.assert_called_once_with(
             fake.CROSS_POOL_SOURCE_LOCATION_INFO,
@@ -2371,7 +2486,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
         self.mock_object(
             self.zapi_client, 'get_flexvol',
             return_value={'aggregate': [fake.CROSS_POOL_SRC_AGGREGATE]})
-
         result = self.library._clone_source_to_destination(
             fake.CROSS_POOL_CLONE_SOURCE, fake.CROSS_POOL_CLONE_DESTINATION)
 
@@ -2402,7 +2516,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             exception.VolumeDriverException,
             self.library._clone_source_to_destination,
             fake.CROSS_POOL_CLONE_SOURCE, fake.CROSS_POOL_CLONE_DESTINATION)
-
         mock_location.assert_called_once_with(fake.CROSS_POOL_SRC_LUN_PATH)
 
     def test_clone_source_to_destination_same_pool(self):
@@ -2410,14 +2523,11 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             block_base.NetAppBlockStorageLibrary,
             '_clone_source_to_destination',
             return_value={'provider_location': 'fake'})
-
         same_pool_dest = fake.CROSS_POOL_CLONE_DESTINATION.copy()
         same_pool_dest['host'] = ('openstack@cdotblock#%s' %
                                   fake.CROSS_POOL_SRC_POOL)
-
         result = self.library._clone_source_to_destination(
             fake.CROSS_POOL_CLONE_SOURCE, same_pool_dest)
-
         mock_super.assert_called_once_with(
             fake.CROSS_POOL_CLONE_SOURCE, same_pool_dest)
         self.assertEqual({'provider_location': 'fake'}, result)
@@ -2428,7 +2538,6 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             self.library, '_get_lun_location_info',
             side_effect=exception.VolumeDriverException(
                 message='Cross-pool clone failed'))
-
         self.assertRaises(
             exception.VolumeDriverException,
             self.library._clone_source_to_destination,
@@ -2448,12 +2557,10 @@ class NetAppBlockStorageCmodeLibraryTestCase(test.TestCase):
             self.zapi_client, 'get_lun_by_args',
             return_value=[fake_clone_lun])
         mock_add_lun = self.mock_object(self.library, '_add_lun_to_table')
-
         self.library._handle_cross_aggregate_clone(
             fake.CROSS_POOL_CLONE_SOURCE, fake.CROSS_POOL_CLONE_DESTINATION,
             fake.CROSS_POOL_SOURCE_LOCATION_INFO,
             fake.CROSS_POOL_DEST_LOCATION_INFO)
-
         mock_copy.assert_called_once_with(
             fake.CROSS_POOL_SRC_LUN_PATH, fake.CROSS_POOL_DST_LUN_PATH,
             fake.CROSS_POOL_SOURCE_LOCATION_INFO,

@@ -516,6 +516,11 @@ class NetAppNVMeStorageLibrary(
         data['sparse_copy_volume'] = True
         data['replication_enabled'] = False
 
+        # Surface disaggregated\-platform flag at the backend level
+        data['netapp_disaggregated_platform'] = (
+            bool(self.configuration.netapp_disaggregated_platform)
+        )
+
         self._stats = data
 
     def _get_pool_stats(self, filter_function=None, goodness_function=None):
@@ -557,18 +562,36 @@ class NetAppNVMeStorageLibrary(
             pool['QoS_support'] = False
             pool['multiattach'] = True
             pool['online_extend_support'] = True
-            pool['consistencygroup_support'] = True
-            pool['consistent_group_snapshot_enabled'] = True
             pool['reserved_percentage'] = self.reserved_percentage
             pool['max_over_subscription_ratio'] = (
                 self.max_over_subscription_ratio)
-
-            # Add up-to-date capacity info
+            # Used to show whether this is a disaggregated
+            # (ASA r2) platform
+            pool['netapp_disaggregated_platform'] = (
+                self.configuration.safe_get(
+                    'netapp_disaggregated_platform'))
+            # Consistency group support is not available
+            # for disaggregated platform as of now.
             if self.configuration.netapp_disaggregated_platform:
-                capacity = self.client.get_cluster_capacity()
+                pool['consistencygroup_support'] = False
+                pool['consistent_group_snapshot_enabled'] = False
+                saz_list = self.client.get_storage_availability_zones()
+                pool['netapp_storage_availability_zones'] = saz_list
+
+                LOG.debug("Getting svm aggregate capacity for disaggregated"
+                          " cluster")
+                # For disaggregated platform, calculate capacity by aggregating
+                # the SVM-mapped aggregate capacities.
+                capacity = self._get_disaggregated_capacity()
             else:
+                pool['consistencygroup_support'] = True
+                pool['consistent_group_snapshot_enabled'] = True
+                pool['netapp_storage_availability_zones'] = None
+                LOG.debug("Getting flexvol %s capacity.", ssc_vol_name)
                 capacity = self.client.get_flexvol_capacity(
                     flexvol_name=ssc_vol_name)
+            LOG.debug("Successfully fetched capacity details: %s",
+                      capacity)
 
             size_total_gb = capacity['size-total'] / units.Gi
             pool['total_capacity_gb'] = na_utils.round_down(size_total_gb)
@@ -576,18 +599,42 @@ class NetAppNVMeStorageLibrary(
             size_available_gb = capacity['size-available'] / units.Gi
             pool['free_capacity_gb'] = na_utils.round_down(size_available_gb)
 
-            namespaces = self.client.get_namespace_sizes_by_volume(
-                ssc_vol_name)
+            # We need to fetch namespace size info to get provisioned
+            # capacity. For the disaggregated platform, we fetch namespaces
+            # across the SVM while for the Unified ONTAP, we fetch
+            # namespaces per flexvol.
+            LOG.debug("Getting namespaces with size info for pool")
+            if self.configuration.netapp_disaggregated_platform:
+                namespaces = self.client.get_namespace_sizes_by_svm()
+                LOG.debug("namespaces %s", namespaces)
+                LOG.debug("Successfully fetched namespace size for "
+                          "pool vserver %s", self.vserver)
+            else:
+                namespaces = self.client.get_namespace_sizes_by_volume(
+                    ssc_vol_name)
             pool['total_volumes'] = len(namespaces)
+            LOG.debug("Total pool volumes: %s", len(namespaces))
+
             if self.configuration.netapp_driver_reports_provisioned_capacity:
                 provisioned_cap = 0
-                for namespace in namespaces:
-                    namespace_name = namespace['path'].split('/')[-1]
-                    # Filtering namespaces that matches the volume name
-                    # template to exclude snapshots.
-                    if volume_utils.extract_id_from_volume_name(
-                            namespace_name):
-                        provisioned_cap = provisioned_cap + namespace['size']
+
+                if self.configuration.netapp_disaggregated_platform:
+                    # For disaggregated platform, use storage units scoped to
+                    # the SVM to compute provisioned capacity. Snapshots are
+                    # implemented as FlexVol snapshots and do not appear as
+                    # separate storage units.
+                    provisioned_cap = (
+                        self._get_disaggregated_provisioned_capacity())
+                else:
+                    for namespace in namespaces:
+                        namespace_name = namespace['path'].split('/')[-1]
+                        # Filtering namespaces that matches
+                        # the volume name template to exclude snapshots.
+                        if volume_utils.extract_id_from_volume_name(
+                                namespace_name):
+                            provisioned_cap = (provisioned_cap
+                                               + namespace['size'])
+                LOG.debug("Provisioned capacity for pool %s", provisioned_cap)
                 pool['provisioned_capacity_gb'] = na_utils.round_down(
                     float(provisioned_cap) / units.Gi)
 
@@ -615,6 +662,54 @@ class NetAppNVMeStorageLibrary(
             pools.append(pool)
 
         return pools
+
+    def _get_disaggregated_provisioned_capacity(self):
+        """Return the sum of provisioned sizes for disaggregated SUs."""
+        if not self.vserver:
+            return 0
+
+        try:
+            storage_units = self.client.get_storage_units_by_svm(
+                vserver=self.vserver)
+        except Exception:
+            LOG.exception("Failed to get storage units for SVM %s.",
+                          self.vserver)
+            raise na_utils.NetAppDriverException(
+                "Failed to get storage units")
+
+        total = 0
+        for unit in storage_units or []:
+            try:
+                size = int(unit.get('provisioned-size', 0))
+            except (TypeError, ValueError):
+                # Malformed or non\-numeric size \-> treat as 0
+                size = 0
+            total += size
+        LOG.debug("Calculated provisioned capacity for SVM %s: %s",
+                  self.vserver, total)
+        return total
+
+    def _get_disaggregated_capacity(self):
+        """Calculate capacity by aggregating SVM-mapped aggregates.
+
+        Returns a dict with `size-total` and `size-available` in bytes.
+        """
+        # Get aggregates mapped to this SVM
+        aggregates = self.client.get_vserver_aggregates()
+        LOG.debug("SVM %s mapped aggregates: %s", self.vserver, aggregates)
+
+        # Fetch capacities for those aggregates
+        aggr_capacities = self.client.get_aggregate_capacities(aggregates)
+        LOG.debug("Fetched capacities for SVM aggregates: %s", aggr_capacities)
+
+        # Sum capacities across all aggregates
+        size_total = 0
+        size_available = 0
+        for caps in aggr_capacities.values():
+            size_total += int(caps.get('size-total', 0))
+            size_available += int(caps.get('size-available', 0))
+
+        return {'size-total': size_total, 'size-available': size_available}
 
     def get_default_filter_function(self):
         """Get the default filter_function string."""
